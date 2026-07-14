@@ -23,3 +23,8 @@ Thumbs.db
 # Virtual environments
 clamaml/
 
+# Plots and metrics
+plots/
+metrics/
+
+
