@@ -46,8 +46,8 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8)
 p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-theta", type=float, default=0.3)
-p.add_argument("--delta-constraint", type=float, default=0.1)
+p.add_argument("--delta-g", type=float, default=0.3)
+p.add_argument("--delta-c", type=float, default=0.1)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
 p.add_argument("--num-constraints", type=int, default=1)
@@ -222,8 +222,8 @@ def evaluate_random(env, seed=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # Adapted params for C-LAMAML
 # ─────────────────────────────────────────────────────────────────────────────
-def get_clamaml_params(mission, policy, encoder, m_adapter, c_adapter, delta_theta, delta_c):
-    """θ' = θ + Δθ_goal * delta_theta + Δθ_constraint * delta_c"""
+def get_clamaml_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c):
+    """θ' = θ + Δθ_goal * delta_g + Δθ_constraint * delta_c"""
     parts = mission.split(" and avoid ", 1)
     goal_str = parts[0]
     constr_str = ("avoid " + parts[1]) if len(parts) == 2 else None
@@ -239,7 +239,7 @@ def get_clamaml_params(mission, policy, encoder, m_adapter, c_adapter, delta_the
         names  = list(dict(policy.named_parameters()).keys())
         params = list(policy.parameters())
         return OrderedDict(
-            (n, p + dg.squeeze(0) * delta_theta + dc.squeeze(0) * delta_c)
+            (n, p + dg.squeeze(0) * delta_g + dc.squeeze(0) * delta_c)
             for n, p, dg, dc in zip(names, params, deltas_g, deltas_c)
         )
 
@@ -393,8 +393,8 @@ def adapt_policy_online(env, policy, initial_params, mission, seed=None, lr=0.5,
 # ─────────────────────────────────────────────────────────────────────────────
 env_name    = args.env_name
 max_steps   = args.max_steps
-delta_theta = args.delta_theta
-delta_c     = args.delta_constraint
+delta_g     = args.delta_g
+delta_c     = args.delta_c
 n_missions  = args.n_missions
 n_episodes  = args.n_episodes
 nc          = args.num_constraints

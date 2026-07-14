@@ -75,8 +75,8 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8)
 p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-theta", type=float, default=0.5)
-p.add_argument("--delta-constraint", type=float, default=0.5)
+p.add_argument("--delta-g", type=float, default=0.5)
+p.add_argument("--delta-c", type=float, default=0.5)
 p.add_argument("--meta-iters", type=int, default=200)
 p.add_argument("--batch-size", type=int, default=40, help="episodes per meta-batch (per task)")
 p.add_argument("--num-workers", type=int, default=4)
@@ -182,8 +182,8 @@ def main():
     room_size    = args.room_size
     num_dists    = args.num_dists
     max_steps    = args.max_steps
-    delta_theta  = args.delta_theta
-    delta_constraint = args.delta_constraint
+    delta_g      = args.delta_g
+    delta_c      = args.delta_c
     num_workers  = args.num_workers
     num_batches  = args.meta_iters
     batch_size   = args.batch_size
@@ -222,7 +222,7 @@ def main():
     env = make_env()
     print("[Unified LA-MAML]\n" f"Using environment: {env_name}\n"
         f"room_size: {room_size}  num_dists: {num_dists}  max_steps: {max_steps}\n"
-        f"delta_theta: {delta_theta}, delta_constraint: {delta_constraint}")
+        f"delta_g: {delta_g}, delta_c: {delta_c}")
 
     # Policy setup 
     hidden_sizes  = (64, 64)
@@ -271,7 +271,7 @@ def main():
         policy=policy,
         mission_encoder=mission_encoder,
         mission_adapter=mission_adapter,  
-        delta_theta=delta_theta,
+        delta_theta=delta_g,
         fast_lr=1e-4,
         first_order=True,
         device=device,
@@ -346,30 +346,30 @@ def main():
         "mission_encoder": mission_encoder.state_dict(),
         "mission_adapter": mission_adapter.state_dict(),
     }
-    torch.save(save_dict, f"unified_model/lang_{env_name}_dt{delta_theta}_{args.num_constraints}c.pth")
+    torch.save(save_dict, f"unified_model/lang_{env_name}_dt{delta_g}_{args.num_constraints}c.pth")
 
     # Plotting
     env_dir = os.path.join("metrics", f"{env_name}_{args.num_constraints}c")
     os.makedirs(env_dir, exist_ok=True)
-    np.save(os.path.join(env_dir, f"unified_avg_steps_{delta_theta}.npy"), np.array(avg_steps_per_batch))
-    np.save(os.path.join(env_dir, f"unified_std_steps_{delta_theta}.npy"), np.array(std_steps_per_batch))
-    np.save(os.path.join(env_dir, f"unified_avg_costs_{delta_theta}.npy"), np.array(avg_costs_per_batch))
-    np.save(os.path.join(env_dir, f"unified_std_costs_{delta_theta}.npy"), np.array(std_costs_per_batch))
-    with open(os.path.join(env_dir, f"unified_meta_{delta_theta}.json"), "w") as f:
+    np.save(os.path.join(env_dir, f"unified_avg_steps_{delta_g}.npy"), np.array(avg_steps_per_batch))
+    np.save(os.path.join(env_dir, f"unified_std_steps_{delta_g}.npy"), np.array(std_steps_per_batch))
+    np.save(os.path.join(env_dir, f"unified_avg_costs_{delta_g}.npy"), np.array(avg_costs_per_batch))
+    np.save(os.path.join(env_dir, f"unified_std_costs_{delta_g}.npy"), np.array(std_costs_per_batch))
+    with open(os.path.join(env_dir, f"unified_meta_{delta_g}.json"), "w") as f:
         json.dump({"label": "Unified LA-MAML", "env": env_name}, f)
 
     plt.plot(avg_steps_per_batch)
     plt.xlabel("Meta-batch")
     plt.ylabel("Avg steps per episode")
-    plt.title(f"[Unified LA-MAML] {env_name} delta_theta={delta_theta} ({args.num_constraints}c)")
-    plt.savefig(os.path.join(env_dir, f"unified_plot_{delta_theta}_{args.num_constraints}c.png"))
+    plt.title(f"[Unified LA-MAML] {env_name} delta_g={delta_g} ({args.num_constraints}c)")
+    plt.savefig(os.path.join(env_dir, f"unified_plot_{delta_g}_{args.num_constraints}c.png"))
     plt.close()
 
     plt.plot(avg_costs_per_batch)
     plt.xlabel("Meta-batch")
     plt.ylabel("Avg cost per episode")
-    plt.title(f"[Unified LA-MAML] {env_name} cost  delta={delta_theta} ({args.num_constraints}c)")
-    plt.savefig(os.path.join(env_dir, f"unified_cost_plot_{delta_theta}_{args.num_constraints}c.png"))
+    plt.title(f"[Unified LA-MAML] {env_name} cost  delta={delta_g} ({args.num_constraints}c)")
+    plt.savefig(os.path.join(env_dir, f"unified_cost_plot_{delta_g}_{args.num_constraints}c.png"))
     plt.close()
 
 

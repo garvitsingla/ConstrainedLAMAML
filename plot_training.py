@@ -51,8 +51,8 @@ def main():
     p.add_argument("--format",           type=str,   default="png",
                    choices=["png", "pdf", "svg"])
     p.add_argument("--smooth",           type=int,   default=0)
-    p.add_argument("--delta-theta",      type=float, default=0.3)
-    p.add_argument("--delta-constraint", type=float, default=0.1)
+    p.add_argument("--delta-g",          type=float, default=0.3)
+    p.add_argument("--delta-c",          type=float, default=0.1)
     args = p.parse_args()
 
     env      = args.env
@@ -62,8 +62,8 @@ def main():
     # ── File paths ───────────────────────────────────────────────────────────
     paths = {
         "c_lamaml": (
-            os.path.join(base_dir, f"c_lamaml_avg_steps_dt{args.delta_theta}_dc{args.delta_constraint}.npy"),
-            os.path.join(base_dir, f"c_lamaml_meta_dt{args.delta_theta}_dc{args.delta_constraint}.json"),
+            os.path.join(base_dir, f"c_lamaml_avg_steps_dt{args.delta_g}_dc{args.delta_c}.npy"),
+            os.path.join(base_dir, f"c_lamaml_meta_dt{args.delta_g}_dc{args.delta_c}.json"),
         ),
         "crl": (
             os.path.join(base_dir, "crl_avg_steps.npy"),
@@ -72,17 +72,17 @@ def main():
     }
 
     paths_std = {
-        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_std_steps_dt{args.delta_theta}_dc{args.delta_constraint}.npy"),
+        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_std_steps_dt{args.delta_g}_dc{args.delta_c}.npy"),
         "crl":              os.path.join(base_dir, "crl_std_steps.npy"),
     }
 
     paths_costs = {
-        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_avg_costs_dt{args.delta_theta}_dc{args.delta_constraint}.npy"),
+        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_avg_costs_dt{args.delta_g}_dc{args.delta_c}.npy"),
         "crl":              os.path.join(base_dir, "crl_avg_costs.npy"),
     }
 
     paths_std_costs = {
-        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_std_costs_dt{args.delta_theta}_dc{args.delta_constraint}.npy"),
+        "c_lamaml":         os.path.join(base_dir, f"c_lamaml_std_costs_dt{args.delta_g}_dc{args.delta_c}.npy"),
         "crl":              os.path.join(base_dir, "crl_std_costs.npy"),
     }
 
@@ -150,7 +150,7 @@ def main():
         ax.grid(True, alpha=0.4)
         fig.tight_layout(pad=0.1)
 
-        out_var_path = os.path.join(out_var_dir, f"dt{args.delta_theta}_dc{args.delta_constraint}.{args.format}")
+        out_var_path = os.path.join(out_var_dir, f"dt{args.delta_g}_dc{args.delta_c}.{args.format}")
         fig.savefig(out_var_path, dpi=300, bbox_inches="tight")
         print(f"Saved variance plot: {out_var_path}")
         plt.close(fig)
@@ -205,7 +205,7 @@ def main():
         ax.grid(True, alpha=0.4)
         fig.tight_layout(pad=0.1)
 
-        out_var_path = os.path.join(out_var_dir, f"dt{args.delta_theta}_dc{args.delta_constraint}_costs.{args.format}")
+        out_var_path = os.path.join(out_var_dir, f"dt{args.delta_g}_dc{args.delta_c}_costs.{args.format}")
         fig.savefig(out_var_path, dpi=300, bbox_inches="tight")
         print(f"Saved cost plot: {out_var_path}")
         plt.close(fig)

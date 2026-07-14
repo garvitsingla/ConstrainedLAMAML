@@ -60,8 +60,8 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8) # Used for dummy env / default fallback
 p.add_argument("--num-dists", type=int, default=2) # Used for dummy env / default fallback
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-theta", type=float, default=0.3)
-p.add_argument("--delta-constraint", type=float, default=0.1)
+p.add_argument("--delta-g", type=float, default=0.3)
+p.add_argument("--delta-c", type=float, default=0.1)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
 p.add_argument("--skip-clamaml", action="store_true")
@@ -148,8 +148,8 @@ def build_env(env_name, room_size, num_dists, max_steps, missions,
 # ── Setup: dummy env + shared encoder ───────────────────────────────────────────────
 env_name    = args.env_name
 max_steps   = args.max_steps
-delta_theta = args.delta_theta
-delta_c     = args.delta_constraint
+delta_g     = args.delta_g
+delta_c     = args.delta_c
 n_missions  = args.n_missions
 n_episodes  = args.n_episodes
 
@@ -191,10 +191,10 @@ policy_param_shapes = [p.shape for p in _make_policy().parameters()]
 # ── Load C-LAMAML ─────────────────────────────────────────────────────────────
 clamaml_ready = False
 if not args.skip_clamaml:
-    _ckpt_path = f"lang_model/lang_{env_name}_dt{delta_theta}_dc{delta_c}_{args.num_constraints}c.pth"
+    _ckpt_path = f"lang_model/lang_{env_name}_dt{delta_g}_dc{delta_c}_{args.num_constraints}c.pth"
     if not os.path.exists(_ckpt_path):
         # Try alternate integer representation (e.g. dt1_dc1 instead of dt1.0_dc1.0)
-        dt_str = str(int(delta_theta)) if delta_theta == int(delta_theta) else str(delta_theta)
+        dt_str = str(int(delta_g)) if delta_g == int(delta_g) else str(delta_g)
         dc_str = str(int(delta_c)) if delta_c == int(delta_c) else str(delta_c)
         _alt_path = f"lang_model/lang_{env_name}_dt{dt_str}_dc{dc_str}_{args.num_constraints}c.pth"
         if os.path.exists(_alt_path):
@@ -217,7 +217,7 @@ if not args.skip_clamaml:
 # ── LoadLA-MAML ───────────────────────────────────────────────────────
 unified_ready = False
 if not args.skip_unified:
-    _ckpt_path = f"unified_model/lang_{env_name}_dt{delta_theta}_{args.num_constraints}c.pth"
+    _ckpt_path = f"unified_model/lang_{env_name}_dt{delta_g}_{args.num_constraints}c.pth"
     if os.path.exists(_ckpt_path):
         ckpt_u = torch.load(_ckpt_path, map_location=device)
         policy_u = _make_policy(); policy_u.load_state_dict(ckpt_u["policy"]); policy_u.eval()
@@ -263,7 +263,7 @@ def _params_clamaml(mission):
         names  = list(dict(policy_c.named_parameters()).keys())
         params = list(policy_c.parameters())
         return OrderedDict(
-            (n, p + dg.squeeze(0) * delta_theta + dc.squeeze(0) * delta_c)
+            (n, p + dg.squeeze(0) * delta_g + dc.squeeze(0) * delta_c)
             for n, p, dg, dc in zip(names, params, deltas_g, deltas_c)
         )
 
@@ -277,7 +277,7 @@ def _params_unified(mission):
         names  = list(dict(policy_u.named_parameters()).keys())
         params = list(policy_u.parameters())
         return OrderedDict(
-            (n, p + d.squeeze(0) * delta_theta)
+            (n, p + d.squeeze(0) * delta_g)
             for n, p, d in zip(names, params, deltas)
         )
 
@@ -360,7 +360,7 @@ excel_rows = []
 
 print(f"\n{'='*65}")
 print(f"Evaluation: {env_name}")
-print(f"Tasks: {n_missions} | Episodes per task: {n_episodes} | delta_theta: {delta_theta} | delta constraint: {delta_c}")
+print(f"Tasks: {n_missions} | Episodes per task: {n_episodes} | delta_g: {delta_g} | delta constraint: {delta_c}")
 print(f"{'='*65}\n")
 
 for config in configs:
@@ -397,7 +397,7 @@ for config in configs:
                     all_metrics[mname]['successes'].append(ok)
                     all_metrics[mname]['viols'].append(v)
                     
-    row = [c_room_size, c_num_dists, max_steps, delta_theta]
+    row = [c_room_size, c_num_dists, max_steps, delta_g]
     for mname, _, _ in METHODS:
         m_steps = config_metrics[mname]['steps']
         m_succs = config_metrics[mname]['successes']

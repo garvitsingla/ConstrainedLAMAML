@@ -75,8 +75,8 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8)
 p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-theta", type=float, default=None)
-p.add_argument("--delta-constraint", type=float, default=None)
+p.add_argument("--delta-g", type=float, default=None)
+p.add_argument("--delta-c", type=float, default=None)
 p.add_argument("--meta-iters", type=int, default=500)
 p.add_argument("--batch-size", type=int, default=40, help="episodes per meta-batch (per task)")
 p.add_argument("--num-workers", type=int, default=4)
@@ -192,8 +192,8 @@ def main():
     max_hazards = args.max_hazards
 
     # Define Delta Pairs to loop over
-    if args.delta_theta is not None and args.delta_constraint is not None:
-        delta_pairs = [(args.delta_theta, args.delta_constraint)]
+    if args.delta_g is not None and args.delta_c is not None:
+        delta_pairs = [(args.delta_g, args.delta_c)]
         force_train = True
     else:
         delta_pairs = [
@@ -233,15 +233,15 @@ def main():
         max_hazards
     )
 
-    for delta_theta, delta_constraint in delta_pairs:
-        ckpt_path = f"lang_model/lang_{env_name}_dt{delta_theta}_dc{delta_constraint}_{args.num_constraints}c.pth"
+    for delta_g, delta_c in delta_pairs:
+        ckpt_path = f"lang_model/lang_{env_name}_dt{delta_g}_dc{delta_c}_{args.num_constraints}c.pth"
         if not force_train and os.path.exists(ckpt_path):
             print(f"\n[Skipping] Checkpoint {ckpt_path} already exists.")
             continue
 
         print(f"\n{'='*70}")
         print(f"Starting C-LAMAML training for {env_name} ({args.num_constraints}c)")
-        print(f"Delta Theta: {delta_theta} | Delta Constraint: {delta_constraint}")
+        print(f"Delta G: {delta_g} | Delta C: {delta_c}")
         print(f"{'='*70}\n")
 
         set_seed(seed)
@@ -298,8 +298,8 @@ def main():
             mission_encoder=mission_encoder,
             mission_adapter=mission_adapter,
             constraint_adapter=constraint_adapter,
-            delta_theta=delta_theta,
-            delta_constraint=delta_constraint,
+            delta_theta=delta_g,
+            delta_constraint=delta_c,
             fast_lr=1e-4,
             first_order=True,
             device=device,
@@ -385,25 +385,25 @@ def main():
         env_dir = os.path.join("metrics", f"{env_name}_{args.num_constraints}c")
         os.makedirs(env_dir, exist_ok=True) 
 
-        np.save(os.path.join(env_dir, f"c_lamaml_avg_steps_dt{delta_theta}_dc{delta_constraint}.npy"), np.array(avg_steps_per_batch))
-        np.save(os.path.join(env_dir, f"c_lamaml_std_steps_dt{delta_theta}_dc{delta_constraint}.npy"), np.array(std_steps_per_batch))
-        np.save(os.path.join(env_dir, f"c_lamaml_avg_costs_dt{delta_theta}_dc{delta_constraint}.npy"), np.array(avg_costs_per_batch))
-        np.save(os.path.join(env_dir, f"c_lamaml_std_costs_dt{delta_theta}_dc{delta_constraint}.npy"), np.array(std_costs_per_batch))
-        with open(os.path.join(env_dir, f"c_lamaml_meta_dt{delta_theta}_dc{delta_constraint}.json"), "w") as f:
+        np.save(os.path.join(env_dir, f"c_lamaml_avg_steps_dt{delta_g}_dc{delta_c}.npy"), np.array(avg_steps_per_batch))
+        np.save(os.path.join(env_dir, f"c_lamaml_std_steps_dt{delta_g}_dc{delta_c}.npy"), np.array(std_steps_per_batch))
+        np.save(os.path.join(env_dir, f"c_lamaml_avg_costs_dt{delta_g}_dc{delta_c}.npy"), np.array(avg_costs_per_batch))
+        np.save(os.path.join(env_dir, f"c_lamaml_std_costs_dt{delta_g}_dc{delta_c}.npy"), np.array(std_costs_per_batch))
+        with open(os.path.join(env_dir, f"c_lamaml_meta_dt{delta_g}_dc{delta_c}.json"), "w") as f:
             json.dump({"label" : "C-LAMAML", "env" : env_name}, f)
         
         plt.plot(avg_steps_per_batch)
         plt.xlabel("Meta-batch")
         plt.ylabel("Average steps per episode")
-        plt.title(f"[C-LAMAML] {env_name} dt={delta_theta}, dc={delta_constraint} ({args.num_constraints}c)")
-        plt.savefig(os.path.join(env_dir, f"C_LaMaml_plot_dt{delta_theta}_dc{delta_constraint}_{args.num_constraints}c.png"))
+        plt.title(f"[C-LAMAML] {env_name} dt={delta_g}, dc={delta_c} ({args.num_constraints}c)")
+        plt.savefig(os.path.join(env_dir, f"C_LaMaml_plot_dt{delta_g}_dc{delta_c}_{args.num_constraints}c.png"))
         plt.close()
 
         plt.plot(avg_costs_per_batch)
         plt.xlabel("Meta-batch")
         plt.ylabel("Average cost per episode")
-        plt.title(f"[C-LAMAML] {env_name} cost dt={delta_theta}, dc={delta_constraint} ({args.num_constraints}c)")
-        plt.savefig(os.path.join(env_dir, f"C_LaMaml_cost_plot_dt{delta_theta}_dc{delta_constraint}_{args.num_constraints}c.png"))
+        plt.title(f"[C-LAMAML] {env_name} cost dt={delta_g}, dc={delta_c} ({args.num_constraints}c)")
+        plt.savefig(os.path.join(env_dir, f"C_LaMaml_cost_plot_dt{delta_g}_dc{delta_c}_{args.num_constraints}c.png"))
         plt.close()
 
 if __name__ == "__main__":

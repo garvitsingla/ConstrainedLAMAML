@@ -70,8 +70,8 @@ def main():
     p.add_argument("--format",           type=str,   default="png",
                    choices=["png", "pdf", "svg"])
     p.add_argument("--smooth",           type=int,   default=0)
-    p.add_argument("--delta-theta",      type=float, default=None)
-    p.add_argument("--delta-constraint", type=float, default=None)
+    p.add_argument("--delta-g",          type=float, default=None)
+    p.add_argument("--delta-c",          type=float, default=None)
     args = p.parse_args()
 
     w = args.smooth if args.smooth > 0 else 10
@@ -91,22 +91,22 @@ def main():
         base_dir = os.path.join(args.metrics_root, env)
 
         # ── Discover delta pairs ─────────────────────────────────────────────
-        if args.delta_theta is not None and args.delta_constraint is not None:
-            delta_pairs = [(args.delta_theta, args.delta_constraint)]
+        if args.delta_g is not None and args.delta_c is not None:
+            delta_pairs = [(args.delta_g, args.delta_c)]
         else:
             delta_pairs = discover_delta_pairs(base_dir)
             if not delta_pairs:
-                dt = args.delta_theta if args.delta_theta is not None else 0.3
-                dc = args.delta_constraint if args.delta_constraint is not None else 0.1
+                dt = args.delta_g if args.delta_g is not None else 0.3
+                dc = args.delta_c if args.delta_c is not None else 0.1
                 delta_pairs = [(dt, dc)]
             else:
-                if args.delta_theta is not None:
-                    delta_pairs = [p for p in delta_pairs if abs(p[0] - args.delta_theta) < 1e-5]
-                if args.delta_constraint is not None:
-                    delta_pairs = [p for p in delta_pairs if abs(p[1] - args.delta_constraint) < 1e-5]
+                if args.delta_g is not None:
+                    delta_pairs = [p for p in delta_pairs if abs(p[0] - args.delta_g) < 1e-5]
+                if args.delta_c is not None:
+                    delta_pairs = [p for p in delta_pairs if abs(p[1] - args.delta_c) < 1e-5]
                 if not delta_pairs:
-                    dt = args.delta_theta if args.delta_theta is not None else 0.3
-                    dc = args.delta_constraint if args.delta_constraint is not None else 0.1
+                    dt = args.delta_g if args.delta_g is not None else 0.3
+                    dc = args.delta_c if args.delta_c is not None else 0.1
                     delta_pairs = [(dt, dc)]
 
         for dt, dc in delta_pairs:
