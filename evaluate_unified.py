@@ -1,4 +1,5 @@
 import os
+import time
 import random
 import builtins
 import io
@@ -81,6 +82,31 @@ def silence():
             yield
     finally:
         builtins.print = real_print
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File Lock helper (to match evaluate_summary.py)
+# ─────────────────────────────────────────────────────────────────────────────
+@contextmanager
+def file_lock(lock_path, timeout=10):
+    lock_file = lock_path + ".lock"
+    start_time = time.time()
+    while True:
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() - start_time > timeout:
+                raise TimeoutError(f"Could not acquire lock on {lock_path} within {timeout} seconds.")
+            time.sleep(0.5)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(lock_file)
+        except OSError:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,129 +310,95 @@ if not available_deltas:
     raise RuntimeError(f"No Unified LA-MAML checkpoints found for {env_name} ({nc}c)!")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Evaluation loop
+# Evaluation loop (Averaged over all configurations)
 # ─────────────────────────────────────────────────────────────────────────────
 configs    = get_configs(env_name)
 test_tasks = random.sample(all_missions, min(n_missions, len(all_missions)))
-
-# Global accumulators
-all_results = {dt: {'steps': [], 'successes': [], 'viols': []} for dt in available_deltas}
-excel_rows  = []
 
 print(f"\n{'='*70}")
 print(f"Evaluating Unified LA-MAML: {env_name}")
 print(f"Tasks: {n_missions} | Episodes/task: {n_episodes} | Deltas: {available_deltas}")
 print(f"{'='*70}\n")
 
-for c_room, c_dists in configs:
-    print(f"Config: Room={c_room}, Dists={c_dists}")
+# Process one delta at a time
+for dt in available_deltas:
+    print(f"Evaluating Delta Theta = {dt}...")
+    results = {'steps': [], 'successes': [], 'viols': []}
 
-    env = build_env(env_name, c_room, c_dists, max_steps,
-                    all_missions, goals_list, constraints_list)
+    for c_room, c_dists in configs:
+        env = build_env(env_name, c_room, c_dists, max_steps,
+                        all_missions, goals_list, constraints_list)
 
-    cfg_results = {dt: {'steps': [], 'successes': [], 'viols': []} for dt in available_deltas}
-
-    for mission in test_tasks:
-        ep_seeds = [random.randint(0, 1_000_000) for _ in range(n_episodes)]
-
-        for dt in available_deltas:
+        for mission in test_tasks:
+            ep_seeds = [random.randint(0, 1_000_000) for _ in range(n_episodes)]
             theta = get_adapted_params(mission, policies[dt], encoder, adapters[dt], dt)
+            
             for ep in range(n_episodes):
                 env.reset_task(mission)
                 s, ok, v = evaluate_policy(env, policies[dt], params=theta, seed=ep_seeds[ep])
-                cfg_results[dt]['steps'].append(s)
-                cfg_results[dt]['successes'].append(ok)
-                cfg_results[dt]['viols'].append(v)
+                results['steps'].append(s)
+                results['successes'].append(ok)
+                results['viols'].append(v)
 
-    # Accumulate into global
-    for dt in available_deltas:
-        all_results[dt]['steps'].extend(cfg_results[dt]['steps'])
-        all_results[dt]['successes'].extend(cfg_results[dt]['successes'])
-        all_results[dt]['viols'].extend(cfg_results[dt]['viols'])
+    # Compute overall statistics for this delta
+    mean_steps = np.mean(results['steps']) if results['steps'] else 0.0
+    std_steps  = np.std(results['steps'])  if results['steps'] else 0.0
+    mean_sr    = round(np.mean(results['successes']), 2) if results['successes'] else 0.0
+    mean_viols = np.mean(results['viols']) if results['viols'] else 0.0
+    std_viols  = np.std(results['viols'])  if results['viols'] else 0.0
 
-    # Build Excel row
-    def fmt(bucket):
-        ms = np.mean(bucket['steps']) if bucket['steps'] else 0.0
-        ss = np.std(bucket['steps'])  if bucket['steps'] else 0.0
-        sr = round(np.mean(bucket['successes']), 2) if bucket['successes'] else 0.0
-        mv = np.mean(bucket['viols']) if bucket['viols'] else 0.0
-        sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
-        return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
+    print(f"  Delta={dt:3.1f}:  SR={mean_sr*100:.2f}%  "
+          f"Steps={mean_steps:.2f} ± {std_steps:.2f}  "
+          f"Viols={mean_viols:.2f} ± {std_viols:.2f}")
 
-    row = [c_room, c_dists, max_steps]
-    for dt in available_deltas:
-        row += fmt(cfg_results[dt])
-    excel_rows.append(row)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Save/Update Excel (with file lock)
+    # ─────────────────────────────────────────────────────────────────────────
+    xlsx_path = "unified_results.xlsx"
+    avg_row = [dt, f"{mean_steps:.2f} ± {std_steps:.2f}", mean_sr, f"{mean_viols:.2f} ± {std_viols:.2f}"]
 
-    # Print per-config summary
-    srs = [f"dt={dt}: {np.mean(cfg_results[dt]['successes'])*100:.1f}%"
-           for dt in available_deltas]
-    print(f"  SR → {' | '.join(srs)}")
+    with file_lock(xlsx_path):
+        if os.path.exists(xlsx_path):
+            wb = load_workbook(xlsx_path)
+        else:
+            wb = Workbook()
+            if "Sheet" in wb.sheetnames:
+                del wb["Sheet"]
 
+        sheet_name = f"{env_name}_{nc}c"[:31]
+        
+        # If it's a new sheet, create it with header. Otherwise, append/overwrite
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(sheet_name)
+            header = ["Delta Theta", "Avg Steps", "Success Prob", "Avg Viols"]
+            ws.append(header)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+        else:
+            ws = wb[sheet_name]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AVERAGE row
-# ─────────────────────────────────────────────────────────────────────────────
-avg_row = ["AVERAGE", "", ""]
-for dt in available_deltas:
-    b = all_results[dt]
-    ms = np.mean(b['steps']) if b['steps'] else 0.0
-    ss = np.std(b['steps'])  if b['steps'] else 0.0
-    sr = round(np.mean(b['successes']), 2) if b['successes'] else 0.0
-    mv = np.mean(b['viols']) if b['viols'] else 0.0
-    sv = np.std(b['viols'])  if b['viols'] else 0.0
-    avg_row += [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
-excel_rows.append(avg_row)
+        # Check if row with this delta already exists in column 1
+        row_idx = None
+        for r in range(2, ws.max_row + 1):
+            val_dt = ws.cell(row=r, column=1).value
+            try:
+                if val_dt is not None:
+                    if abs(float(val_dt) - dt) < 1e-5:
+                        row_idx = r
+                        break
+            except (ValueError, TypeError):
+                continue
 
+        if row_idx is not None:
+            # Overwrite existing row
+            for col_idx, val in enumerate(avg_row, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=val)
+            print(f"  Updated entry for delta={dt} in sheet '{sheet_name}'")
+        else:
+            # Append new row
+            ws.append(avg_row)
+            print(f"  Appended new entry for delta={dt} in sheet '{sheet_name}'")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Console summary
-# ─────────────────────────────────────────────────────────────────────────────
-print(f"\n{'='*70}")
-print("FINAL AGGREGATE RESULTS (Unified LA-MAML Study)")
-print(f"{'='*70}")
-for dt in available_deltas:
-    b = all_results[dt]
-    print(f"Delta={dt:3.1f}:  SR={np.mean(b['successes'])*100:.2f}%  "
-          f"Steps={np.mean(b['steps']):.2f} ± {np.std(b['steps']):.2f}  "
-          f"Viols={np.mean(b['viols']):.2f} ± {np.std(b['viols']):.2f}")
+        wb.save(xlsx_path)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Save to Excel
-# ─────────────────────────────────────────────────────────────────────────────
-xlsx_path = "unified_results.xlsx"
-if os.path.exists(xlsx_path):
-    wb = load_workbook(xlsx_path)
-else:
-    wb = Workbook()
-    if "Sheet" in wb.sheetnames:
-        del wb["Sheet"]
-
-sheet_name = f"{env_name}_{nc}c"[:31]
-if sheet_name in wb.sheetnames:
-    ws = wb[sheet_name]
-    ws.append([])
-    ws.append([f"--- NEW RUN ---"])
-    ws[ws.max_row][0].font = Font(bold=True)
-else:
-    ws = wb.create_sheet(sheet_name)
-
-# Header
-header = ["Room Size", "Num Distractor", "Max Steps"]
-for dt in available_deltas:
-    header += [f"Avg Steps (dt={dt})", f"Success Prob (dt={dt})", f"Avg Viols (dt={dt})"]
-ws.append(header)
-
-# Bold the header row
-for cell in ws[ws.max_row]:
-    cell.font = Font(bold=True)
-
-for row in excel_rows:
-    ws.append(row)
-
-for cell in ws[ws.max_row]:
-    cell.font = Font(bold=True)
-
-wb.save(xlsx_path)
-print(f"\nResults saved → {xlsx_path}  (sheet: '{sheet_name}')")
+print(f"\nAll summary results successfully saved to {xlsx_path}")

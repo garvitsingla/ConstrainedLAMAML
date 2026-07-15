@@ -84,7 +84,7 @@ p.add_argument("--lambda-grass", type=float, default=0.3)
 p.add_argument("--lambda-water", type=float, default=0.5)
 p.add_argument("--hazard-density", type=float, default=0.2)
 p.add_argument("--max-hazards", type=int, default=4, help="max constraint tiles")
-p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--num-constraints", type=int, default=2)
 
 args = p.parse_args()
 
