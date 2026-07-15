@@ -315,8 +315,8 @@ print(f"    Constraint adapter: {'✓' if c_adapter else '✗'}")
 ABLATIONS = [
     "C-LAMAML (Full)",
     "Global Only",
-    "Goal Adapter Only",
-    "Constraint Adapter Only",
+    "Global + Goal Adapter",
+    "Global + Constraint Adapter",
 ]
 
 
@@ -365,23 +365,23 @@ for c_room, c_dists in configs:
             cfg_results["Global Only"]['successes'].append(ok)
             cfg_results["Global Only"]['viols'].append(v)
 
-        # 3. Goal Adapter Only
+        # 3. Global + Goal Adapter
         theta_goal = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=True, use_constraint=False)
         for ep in range(n_episodes):
             env.reset_task(mission)
             s, ok, v = evaluate_policy(env, policy, params=theta_goal, seed=ep_seeds[ep])
-            cfg_results["Goal Adapter Only"]['steps'].append(s)
-            cfg_results["Goal Adapter Only"]['successes'].append(ok)
-            cfg_results["Goal Adapter Only"]['viols'].append(v)
+            cfg_results["Global + Goal Adapter"]['steps'].append(s)
+            cfg_results["Global + Goal Adapter"]['successes'].append(ok)
+            cfg_results["Global + Goal Adapter"]['viols'].append(v)
 
-        # 4. Constraint Adapter Only
+        # 4. Global + Constraint Adapter
         theta_constr = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=False, use_constraint=True)
         for ep in range(n_episodes):
             env.reset_task(mission)
             s, ok, v = evaluate_policy(env, policy, params=theta_constr, seed=ep_seeds[ep])
-            cfg_results["Constraint Adapter Only"]['steps'].append(s)
-            cfg_results["Constraint Adapter Only"]['successes'].append(ok)
-            cfg_results["Constraint Adapter Only"]['viols'].append(v)
+            cfg_results["Global + Constraint Adapter"]['steps'].append(s)
+            cfg_results["Global + Constraint Adapter"]['successes'].append(ok)
+            cfg_results["Global + Constraint Adapter"]['viols'].append(v)
 
     # Accumulate into global
     for label in ABLATIONS:
