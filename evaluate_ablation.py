@@ -398,7 +398,7 @@ for c_room, c_dists in configs:
         sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
         return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
 
-    row = [c_room, c_dists, max_steps, delta_g]
+    row = [c_room, c_dists, max_steps, delta_g, delta_c]
     for label in ABLATIONS:
         row += fmt(cfg_results[label])
     excel_rows.append(row)
@@ -412,7 +412,7 @@ for c_room, c_dists in configs:
 # ─────────────────────────────────────────────────────────────────────────────
 # AVERAGE row
 # ─────────────────────────────────────────────────────────────────────────────
-avg_row = ["AVERAGE", "", "", ""]
+avg_row = ["AVERAGE", "", "", "", ""]
 for label in ABLATIONS:
     b = all_results[label]
     ms = np.mean(b['steps']) if b['steps'] else 0.0
@@ -460,7 +460,7 @@ else:
     is_new_sheet = True
 
 # Header
-header = ["Room Size", "Num Distractor", "Max Steps", "Delta G"]
+header = ["Room Size", "Num Distractor", "Max Steps", "Delta G", "Delta C"]
 for label in ABLATIONS:
     header += [f"Avg Steps {label}", f"Success Prob {label}", f"Avg Viols {label}"]
 ws.append(header)
