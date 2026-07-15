@@ -45,11 +45,10 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8)
 p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-g", type=float, default=0.3)
-p.add_argument("--delta-c", type=float, default=0.1)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
 p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--deltas", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.9])
 args = p.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,41 +194,18 @@ def evaluate_policy(env, policy, params=None, seed=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Adapted params — 4 ablation variants
-# All use the SAME checkpoint, only differ in which adapter outputs are applied.
-#
-#   1. Full C-LAMAML:      θ' = θ + f_goal(goal)*δθ + f_constr(constr)*δc
-#   2. Global Only:         θ' = θ
-#   3. Goal Adapter Only:   θ' = θ + f_goal(goal)*δθ
-#   4. Constraint Only:     θ' = θ + f_constr(constr)*δc
+# Adapted params for unified LA-MAML
 # ─────────────────────────────────────────────────────────────────────────────
-def get_adapted_params(mission, policy, encoder, m_adapter, c_adapter,
-                       delta_g, delta_c, use_goal=True, use_constraint=True):
-    parts = mission.split(" and avoid ", 1)
-    goal_str = parts[0]
-    constr_str = ("avoid " + parts[1]) if len(parts) == 2 else None
-
+def get_adapted_params(mission, policy, encoder, adapter, delta_theta):
+    combined = f"{mission[0]} and {mission[1]}" if isinstance(mission, tuple) else mission
     with torch.no_grad():
-        names  = list(dict(policy.named_parameters()).keys())
+        emb = encoder(combined).to(device)
+        deltas = adapter(emb)
+        names = list(dict(policy.named_parameters()).keys())
         params = list(policy.parameters())
-
-        # Goal delta
-        if use_goal:
-            g_emb    = encoder(goal_str).to(device)
-            deltas_g = [dg.squeeze(0) * delta_g for dg in m_adapter(g_emb)]
-        else:
-            deltas_g = [torch.zeros_like(p) for p in params]
-
-        # Constraint delta
-        if use_constraint and constr_str and c_adapter:
-            c_emb    = encoder(constr_str).to(device)
-            deltas_c = [dc.squeeze(0) * delta_c for dc in c_adapter(c_emb)]
-        else:
-            deltas_c = [torch.zeros_like(p) for p in params]
-
         return OrderedDict(
-            (n, p + dg + dc)
-            for n, p, dg, dc in zip(names, params, deltas_g, deltas_c)
+            (n, p + d.squeeze(0) * delta_theta)
+            for n, p, d in zip(names, params, deltas)
         )
 
 
@@ -238,8 +214,6 @@ def get_adapted_params(mission, policy, encoder, m_adapter, c_adapter,
 # ─────────────────────────────────────────────────────────────────────────────
 env_name    = args.env_name
 max_steps   = args.max_steps
-delta_g     = args.delta_g
-delta_c     = args.delta_c
 n_missions  = args.n_missions
 n_episodes  = args.n_episodes
 nc          = args.num_constraints
@@ -249,7 +223,7 @@ goals_list = GOALS_MAP[env_name]
 constraints_list = CONSTRAINT_TEXTS if nc == 1 else DOUBLE_CONSTRAINT_TEXTS
 all_missions = [f"{g} and {c}" for g in goals_list for c in constraints_list]
 
-# Create dummy env for observation/action shapes
+# Create dummy env for shapes
 dummy_env = build_env(env_name, args.room_size, args.num_dists, max_steps,
                       all_missions, goals_list, constraints_list)
 dummy_obs, _ = dummy_env.reset()
@@ -266,27 +240,6 @@ def make_policy():
 
 policy_param_shapes = [p.shape for p in make_policy().parameters()]
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Load C-LAMAML checkpoint (shared across all 4 ablations)
-# ─────────────────────────────────────────────────────────────────────────────
-clamaml_ckpt = f"lang_model/lang_{env_name}_dt{delta_g}_dc{delta_c}_{nc}c.pth"
-if not os.path.exists(clamaml_ckpt):
-    # Try alternate integer representation (e.g. dt1_dc1 instead of dt1.0_dc1.0)
-    dt_str = str(int(delta_g)) if delta_g == int(delta_g) else str(delta_g)
-    dc_str = str(int(delta_c)) if delta_c == int(delta_c) else str(delta_c)
-    clamaml_ckpt_alt = f"lang_model/lang_{env_name}_dt{dt_str}_dc{dc_str}_{nc}c.pth"
-    if os.path.exists(clamaml_ckpt_alt):
-        clamaml_ckpt = clamaml_ckpt_alt
-
-if not os.path.exists(clamaml_ckpt):
-    raise FileNotFoundError(f"C-LAMAML checkpoint not found: {clamaml_ckpt}")
-
-ckpt = torch.load(clamaml_ckpt, map_location=device)
-policy = make_policy()
-policy.load_state_dict(ckpt["policy"])
-policy.eval()
-
 encoder = SentenceMissionEncoder(
     model_name="all-MiniLM-L6-v2", frozen=True,
     normalize=True, cache=True, device=device,
@@ -294,31 +247,41 @@ encoder = SentenceMissionEncoder(
 encoder.eval()
 enc_dim = encoder.output_dim
 
-m_adapter = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
-m_adapter.load_state_dict(ckpt["mission_adapter"])
-m_adapter.eval()
+# Load available checkpoints
+available_deltas = []
+policies = {}
+adapters = {}
 
-c_adapter = None
-if "constraint_adapter" in ckpt:
-    c_adapter = ConstraintParamAdapter(enc_dim, policy_param_shapes).to(device)
-    c_adapter.load_state_dict(ckpt["constraint_adapter"])
-    c_adapter.eval()
+print(f"\nSearching for Unified LA-MAML checkpoints...")
+for dt in args.deltas:
+    dt_str = str(int(dt)) if dt == int(dt) else str(dt)
+    ckpt_path = f"unified_model/lang_{env_name}_dt{dt_str}_{nc}c.pth"
+    if not os.path.exists(ckpt_path):
+        # Fallback to standard float format string
+        ckpt_path = f"unified_model/lang_{env_name}_dt{dt}_{nc}c.pth"
+        
+    if os.path.exists(ckpt_path):
+        print(f"  [✓] Found checkpoint for delta={dt}: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+        
+        # Policy
+        pol = make_policy()
+        pol.load_state_dict(ckpt["policy"])
+        pol.eval()
+        policies[dt] = pol
+        
+        # Adapter
+        ad = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
+        ad.load_state_dict(ckpt["mission_adapter"])
+        ad.eval()
+        adapters[dt] = ad
+        
+        available_deltas.append(dt)
+    else:
+        print(f"  [✗] Checkpoint not found for delta={dt}: {ckpt_path}")
 
-print(f"[✓] C-LAMAML loaded from {clamaml_ckpt}")
-print(f"    Goal adapter: ✓")
-print(f"    Constraint adapter: {'✓' if c_adapter else '✗'}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Define the 4 ablation methods
-# ─────────────────────────────────────────────────────────────────────────────
-ABLATIONS = [
-    "C-LAMAML",
-    "Global Only",
-    "Global + Goal Adapter",
-    "Global + Constraint Adapter",
-]
-
+if not available_deltas:
+    raise RuntimeError(f"No Unified LA-MAML checkpoints found for {env_name} ({nc}c)!")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Evaluation loop
@@ -327,13 +290,12 @@ configs    = get_configs(env_name)
 test_tasks = random.sample(all_missions, min(n_missions, len(all_missions)))
 
 # Global accumulators
-all_results = {label: {'steps': [], 'successes': [], 'viols': []} for label in ABLATIONS}
+all_results = {dt: {'steps': [], 'successes': [], 'viols': []} for dt in available_deltas}
 excel_rows  = []
 
 print(f"\n{'='*70}")
-print(f"Ablation Study: {env_name}")
-print(f"Tasks: {n_missions} | Episodes/task: {n_episodes} | "
-      f"delta_g: {delta_g} | delta_c: {delta_c}")
+print(f"Evaluating Unified LA-MAML: {env_name}")
+print(f"Tasks: {n_missions} | Episodes/task: {n_episodes} | Deltas: {available_deltas}")
 print(f"{'='*70}\n")
 
 for c_room, c_dists in configs:
@@ -342,52 +304,25 @@ for c_room, c_dists in configs:
     env = build_env(env_name, c_room, c_dists, max_steps,
                     all_missions, goals_list, constraints_list)
 
-    cfg_results = {label: {'steps': [], 'successes': [], 'viols': []} for label in ABLATIONS}
+    cfg_results = {dt: {'steps': [], 'successes': [], 'viols': []} for dt in available_deltas}
 
     for mission in test_tasks:
         ep_seeds = [random.randint(0, 1_000_000) for _ in range(n_episodes)]
 
-        # 1. C-LAMAML
-        theta_full = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=True, use_constraint=True)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_full, seed=ep_seeds[ep])
-            cfg_results["C-LAMAML"]['steps'].append(s)
-            cfg_results["C-LAMAML"]['successes'].append(ok)
-            cfg_results["C-LAMAML"]['viols'].append(v)
-
-        # 2. Global Params Only (No Adapters)
-        theta_global = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=False, use_constraint=False)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_global, seed=ep_seeds[ep])
-            cfg_results["Global Only"]['steps'].append(s)
-            cfg_results["Global Only"]['successes'].append(ok)
-            cfg_results["Global Only"]['viols'].append(v)
-
-        # 3. Global + Goal Adapter
-        theta_goal = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=True, use_constraint=False)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_goal, seed=ep_seeds[ep])
-            cfg_results["Global + Goal Adapter"]['steps'].append(s)
-            cfg_results["Global + Goal Adapter"]['successes'].append(ok)
-            cfg_results["Global + Goal Adapter"]['viols'].append(v)
-
-        # 4. Global + Constraint Adapter
-        theta_constr = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=False, use_constraint=True)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_constr, seed=ep_seeds[ep])
-            cfg_results["Global + Constraint Adapter"]['steps'].append(s)
-            cfg_results["Global + Constraint Adapter"]['successes'].append(ok)
-            cfg_results["Global + Constraint Adapter"]['viols'].append(v)
+        for dt in available_deltas:
+            theta = get_adapted_params(mission, policies[dt], encoder, adapters[dt], dt)
+            for ep in range(n_episodes):
+                env.reset_task(mission)
+                s, ok, v = evaluate_policy(env, policies[dt], params=theta, seed=ep_seeds[ep])
+                cfg_results[dt]['steps'].append(s)
+                cfg_results[dt]['successes'].append(ok)
+                cfg_results[dt]['viols'].append(v)
 
     # Accumulate into global
-    for label in ABLATIONS:
-        all_results[label]['steps'].extend(cfg_results[label]['steps'])
-        all_results[label]['successes'].extend(cfg_results[label]['successes'])
-        all_results[label]['viols'].extend(cfg_results[label]['viols'])
+    for dt in available_deltas:
+        all_results[dt]['steps'].extend(cfg_results[dt]['steps'])
+        all_results[dt]['successes'].extend(cfg_results[dt]['successes'])
+        all_results[dt]['viols'].extend(cfg_results[dt]['viols'])
 
     # Build Excel row
     def fmt(bucket):
@@ -398,23 +333,23 @@ for c_room, c_dists in configs:
         sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
         return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
 
-    row = [c_room, c_dists, max_steps, delta_g]
-    for label in ABLATIONS:
-        row += fmt(cfg_results[label])
+    row = [c_room, c_dists, max_steps]
+    for dt in available_deltas:
+        row += fmt(cfg_results[dt])
     excel_rows.append(row)
 
     # Print per-config summary
-    srs = [f"{label}: {np.mean(cfg_results[label]['successes'])*100:.1f}%"
-           for label in ABLATIONS]
+    srs = [f"dt={dt}: {np.mean(cfg_results[dt]['successes'])*100:.1f}%"
+           for dt in available_deltas]
     print(f"  SR → {' | '.join(srs)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AVERAGE row
 # ─────────────────────────────────────────────────────────────────────────────
-avg_row = ["AVERAGE", "", "", ""]
-for label in ABLATIONS:
-    b = all_results[label]
+avg_row = ["AVERAGE", "", ""]
+for dt in available_deltas:
+    b = all_results[dt]
     ms = np.mean(b['steps']) if b['steps'] else 0.0
     ss = np.std(b['steps'])  if b['steps'] else 0.0
     sr = round(np.mean(b['successes']), 2) if b['successes'] else 0.0
@@ -428,11 +363,11 @@ excel_rows.append(avg_row)
 # Console summary
 # ─────────────────────────────────────────────────────────────────────────────
 print(f"\n{'='*70}")
-print("FINAL AGGREGATE RESULTS (Ablation Study)")
+print("FINAL AGGREGATE RESULTS (Unified LA-MAML Study)")
 print(f"{'='*70}")
-for label in ABLATIONS:
-    b = all_results[label]
-    print(f"{label:30s}:  SR={np.mean(b['successes'])*100:.2f}%  "
+for dt in available_deltas:
+    b = all_results[dt]
+    print(f"Delta={dt:3.1f}:  SR={np.mean(b['successes'])*100:.2f}%  "
           f"Steps={np.mean(b['steps']):.2f} ± {np.std(b['steps']):.2f}  "
           f"Viols={np.mean(b['viols']):.2f} ± {np.std(b['viols']):.2f}")
 
@@ -440,7 +375,7 @@ for label in ABLATIONS:
 # ─────────────────────────────────────────────────────────────────────────────
 # Save to Excel
 # ─────────────────────────────────────────────────────────────────────────────
-xlsx_path = "ablation_results.xlsx"
+xlsx_path = "unified_results.xlsx"
 if os.path.exists(xlsx_path):
     wb = load_workbook(xlsx_path)
 else:
@@ -449,20 +384,18 @@ else:
         del wb["Sheet"]
 
 sheet_name = f"{env_name}_{nc}c"[:31]
-is_new_sheet = False
 if sheet_name in wb.sheetnames:
     ws = wb[sheet_name]
     ws.append([])
-    ws.append([f"--- NEW RUN: delta_g={delta_g}, delta_c={delta_c} ---"])
+    ws.append([f"--- NEW RUN ---"])
     ws[ws.max_row][0].font = Font(bold=True)
 else:
     ws = wb.create_sheet(sheet_name)
-    is_new_sheet = True
 
 # Header
-header = ["Room Size", "Num Distractor", "Max Steps", "Delta G"]
-for label in ABLATIONS:
-    header += [f"Avg Steps {label}", f"Success Prob {label}", f"Avg Viols {label}"]
+header = ["Room Size", "Num Distractor", "Max Steps"]
+for dt in available_deltas:
+    header += [f"Avg Steps (dt={dt})", f"Success Prob (dt={dt})", f"Avg Viols (dt={dt})"]
 ws.append(header)
 
 # Bold the header row

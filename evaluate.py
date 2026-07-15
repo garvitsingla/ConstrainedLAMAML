@@ -125,8 +125,8 @@ GOALS_MAP = {
 def build_env(env_name, room_size, num_dists, max_steps, missions,
               goals=None, constraints=None):
     # Handle environment specific overrides for room_size/num_dists similarly to evaluate_all.py
-    r_size = "env" if env_name in ["GoToObjDoor"] else room_size
-    n_dists = "env" if env_name in ["OpenDoor","OpenDoorLoc","OpenDoorsOrder"] else num_dists
+    r_size = "env" if env_name in ["ConstrainedGoToObjDoor"] else room_size
+    n_dists = "env" if env_name in ["ConstrainedOpenDoor","ConstrainedOpenDoorLoc","ConstrainedOpenDoorsOrder"] else num_dists
     
     if r_size == "env" and env_name == "ConstrainedActionObjDoor":
         r_size = args.room_size

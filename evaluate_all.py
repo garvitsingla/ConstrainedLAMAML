@@ -141,8 +141,8 @@ def build_env(env_name, room_size, num_dists, max_steps, missions,
 
 # ── Setup: env + shared encoder ───────────────────────────────────────────────
 env_name    = args.env_name
-room_size   = "env" if env_name in ["GoToObjDoor"] else args.room_size
-num_dists   = "env" if env_name in ["OpenDoor","OpenDoorLoc","OpenDoorsOrder"] else args.num_dists
+room_size   = "env" if env_name in ["ConstrainedGoToObjDoor"] else args.room_size
+num_dists   = "env" if env_name in ["ConstrainedOpenDoor","ConstrainedOpenDoorLoc","ConstrainedOpenDoorsOrder"] else args.num_dists
 max_steps   = args.max_steps
 delta_g     = args.delta_g
 delta_c     = args.delta_c
