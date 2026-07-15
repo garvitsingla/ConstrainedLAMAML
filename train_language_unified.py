@@ -75,9 +75,8 @@ p.add_argument("--env", dest="env_name",
 p.add_argument("--room-size", type=int, default=8)
 p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
-p.add_argument("--delta-g", type=float, default=0.5)
-p.add_argument("--delta-c", type=float, default=0.5)
-p.add_argument("--meta-iters", type=int, default=200)
+p.add_argument("--delta", type=float, default=None)
+p.add_argument("--meta-iters", type=int, default=500)
 p.add_argument("--batch-size", type=int, default=40, help="episodes per meta-batch (per task)")
 p.add_argument("--num-workers", type=int, default=4)
 p.add_argument("--lambda-lava", type=float, default=0.8)
@@ -182,13 +181,19 @@ def main():
     room_size    = args.room_size
     num_dists    = args.num_dists
     max_steps    = args.max_steps
-    delta_g      = args.delta_g
-    delta_c      = args.delta_c
     num_workers  = args.num_workers
     num_batches  = args.meta_iters
     batch_size   = args.batch_size
     hazard_density = args.hazard_density
     max_hazards = args.max_hazards
+
+    # Define Delta values to loop over
+    if args.delta is not None:
+        deltas = [args.delta]
+        force_train = True
+    else:
+        deltas = [0.3, 0.5, 0.7, 0.9]
+        force_train = False
 
     missions = select_missions(env_name, num_constraints=args.num_constraints)
 
@@ -219,158 +224,167 @@ def main():
         max_hazards
     )
 
-    env = make_env()
-    print("[Unified LA-MAML]\n" f"Using environment: {env_name}\n"
-        f"room_size: {room_size}  num_dists: {num_dists}  max_steps: {max_steps}\n"
-        f"delta_g: {delta_g}, delta_c: {delta_c}")
+    for delta in deltas:
+        ckpt_path = f"unified_model/lang_{env_name}_dt{delta}_{args.num_constraints}c.pth"
+        if not force_train and os.path.exists(ckpt_path):
+            print(f"\n[Skipping] Checkpoint {ckpt_path} already exists.")
+            continue
 
-    # Policy setup 
-    hidden_sizes  = (64, 64)
-    nonlinearity  = torch.nn.functional.tanh
+        print(f"\n{'='*70}")
+        print(f"Starting Unified LA-MAML training for {env_name} ({args.num_constraints}c)")
+        print(f"delta: {delta}")
+        print(f"{'='*70}\n")
 
-    mission_encoder = SentenceMissionEncoder(
-        model_name="all-MiniLM-L6-v2",
-        frozen=True,
-        normalize=True,
-        cache=True,
-        device=device
-    )
-    mission_encoder_output_dim = mission_encoder.output_dim
+        set_seed(1)
 
-    obs, _ = env.reset()
-    vec = preprocess_obs(obs)
-    input_size  = vec.shape[0]
-    output_size = env.action_space.n
+        env = make_env()
 
-    policy = CategoricalMLPPolicy(
-        input_size=input_size,
-        output_size=output_size,
-        hidden_sizes=hidden_sizes,
-        nonlinearity=nonlinearity,
-    ).to(device)
-    policy.share_memory()
-    baseline = LinearFeatureBaseline(input_size).to(device)
-    cost_baseline = LinearFeatureBaseline(input_size).to(device)
+        # Policy setup 
+        hidden_sizes  = (64, 64)
+        nonlinearity  = torch.nn.functional.tanh
 
-    policy_param_shapes = [p.shape for p in policy.parameters()]
-
-    mission_adapter = MissionParamAdapter(mission_encoder_output_dim, policy_param_shapes).to(device)
-
-    sampler = MultiTaskSampler(
-        env=env,
-        env_fn=make_env,
-        batch_size=batch_size,
-        policy=policy,
-        baseline=baseline,
-        cost_baseline=cost_baseline,
-        seed=1,
-        num_workers=num_workers
-    )
-
-    meta_learner = MAMLTRPO(
-        policy=policy,
-        mission_encoder=mission_encoder,
-        mission_adapter=mission_adapter,  
-        delta_theta=delta_g,
-        fast_lr=1e-4,
-        first_order=True,
-        device=device,
-        lambda_weights={2: args.lambda_lava, 3: args.lambda_grass, 4: args.lambda_water}
-    )
-
-
-    avg_steps_per_batch = []
-    std_steps_per_batch = []
-    avg_costs_per_batch = []
-    std_costs_per_batch = []
-
-    total_tasks    = len(missions)
-    meta_batch_size = min(10, total_tasks)
-
-    start_time = time.time()
-
-    for batch in range(num_batches):
-        print(f"\nBatch {batch + 1}/{num_batches}")
-        valid_episodes, step_counts = sampler.sample(
-            meta_batch_size,
-            meta_learner,
-            gamma=0.99,
-            gae_lambda=1.0,
+        mission_encoder = SentenceMissionEncoder(
+            model_name="all-MiniLM-L6-v2",
+            frozen=True,
+            normalize=True,
+            cache=True,
             device=device
         )
+        mission_encoder_output_dim = mission_encoder.output_dim
 
-        avg_steps = np.mean(step_counts) if len(step_counts) > 0 else float('nan')
-        avg_steps_per_episode = avg_steps / sampler.batch_size 
-        avg_steps_per_batch.append(avg_steps_per_episode)
-        std_steps = np.std([s / sampler.batch_size for s in step_counts]) if len(step_counts) > 0 else 0.0
-        std_steps_per_batch.append(std_steps)
-        print(f"Average steps in Meta-batch {batch+1}: {avg_steps_per_episode}")
+        obs, _ = env.reset()
+        vec = preprocess_obs(obs)
+        input_size  = vec.shape[0]
+        output_size = env.action_space.n
 
-        total_cost = 0
-        count = 0
-        all_costs = []
-        for ep in valid_episodes:
-            if hasattr(ep, '_costs') and ep._costs is not None:
-                total_cost += ep._costs.sum().item()
-                count      += ep._costs.shape[1]
-                all_costs.extend(ep._costs.sum(dim=0).detach().cpu().numpy())
-            elif hasattr(ep, 'costs'):
-                try:
-                    total_cost += ep.costs.sum().item()
-                    count      += ep.costs.shape[1]
-                    all_costs.extend(ep.costs.sum(dim=0).detach().cpu().numpy())
-                except Exception:
-                    pass
-        avg_cost = total_cost / max(count, 1)
-        std_cost = float(np.std(all_costs)) if len(all_costs) > 0 else 0.0
-        avg_costs_per_batch.append(avg_cost)
-        std_costs_per_batch.append(std_cost)
-        print(f"Average cost in Batch {batch+1}: {avg_cost:.4f}")
+        policy = CategoricalMLPPolicy(
+            input_size=input_size,
+            output_size=output_size,
+            hidden_sizes=hidden_sizes,
+            nonlinearity=nonlinearity,
+        ).to(device)
+        policy.share_memory()
+        baseline = LinearFeatureBaseline(input_size).to(device)
+        cost_baseline = LinearFeatureBaseline(input_size).to(device)
 
-        meta_learner.step(valid_episodes, valid_episodes)
+        policy_param_shapes = [p.shape for p in policy.parameters()]
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        mission_adapter = MissionParamAdapter(mission_encoder_output_dim, policy_param_shapes).to(device)
 
-    end_time = time.time()
-    training_time = end_time - start_time
-    time_per_iteration = training_time / num_batches
-    print(f"Total training time: {training_time:.2f} seconds")
-    print(f"Average time per iteration: {time_per_iteration:.2f} seconds")
+        sampler = MultiTaskSampler(
+            env=env,
+            env_fn=make_env,
+            batch_size=batch_size,
+            policy=policy,
+            baseline=baseline,
+            cost_baseline=cost_baseline,
+            seed=1,
+            num_workers=num_workers
+        )
 
-    # Save the trained meta-policy parameters
-    os.makedirs("unified_model", exist_ok=True)
-    save_dict = {
-        "policy": policy.state_dict(),
-        "mission_encoder": mission_encoder.state_dict(),
-        "mission_adapter": mission_adapter.state_dict(),
-    }
-    torch.save(save_dict, f"unified_model/lang_{env_name}_dt{delta_g}_{args.num_constraints}c.pth")
+        meta_learner = MAMLTRPO(
+            policy=policy,
+            mission_encoder=mission_encoder,
+            mission_adapter=mission_adapter,  
+            delta_theta=delta,
+            fast_lr=1e-4,
+            first_order=True,
+            device=device,
+            lambda_weights={2: args.lambda_lava, 3: args.lambda_grass, 4: args.lambda_water}
+        )
 
-    # Plotting
-    env_dir = os.path.join("metrics", f"{env_name}_{args.num_constraints}c")
-    os.makedirs(env_dir, exist_ok=True)
-    np.save(os.path.join(env_dir, f"unified_avg_steps_{delta_g}.npy"), np.array(avg_steps_per_batch))
-    np.save(os.path.join(env_dir, f"unified_std_steps_{delta_g}.npy"), np.array(std_steps_per_batch))
-    np.save(os.path.join(env_dir, f"unified_avg_costs_{delta_g}.npy"), np.array(avg_costs_per_batch))
-    np.save(os.path.join(env_dir, f"unified_std_costs_{delta_g}.npy"), np.array(std_costs_per_batch))
-    with open(os.path.join(env_dir, f"unified_meta_{delta_g}.json"), "w") as f:
-        json.dump({"label": "Unified LA-MAML", "env": env_name}, f)
+        avg_steps_per_batch = []
+        std_steps_per_batch = []
+        avg_costs_per_batch = []
+        std_costs_per_batch = []
 
-    plt.plot(avg_steps_per_batch)
-    plt.xlabel("Meta-batch")
-    plt.ylabel("Avg steps per episode")
-    plt.title(f"[Unified LA-MAML] {env_name} delta_g={delta_g} ({args.num_constraints}c)")
-    plt.savefig(os.path.join(env_dir, f"unified_plot_{delta_g}_{args.num_constraints}c.png"))
-    plt.close()
+        total_tasks    = len(missions)
+        meta_batch_size = min(10, total_tasks)
 
-    plt.plot(avg_costs_per_batch)
-    plt.xlabel("Meta-batch")
-    plt.ylabel("Avg cost per episode")
-    plt.title(f"[Unified LA-MAML] {env_name} cost  delta={delta_g} ({args.num_constraints}c)")
-    plt.savefig(os.path.join(env_dir, f"unified_cost_plot_{delta_g}_{args.num_constraints}c.png"))
-    plt.close()
+        start_time = time.time()
+
+        for batch in range(num_batches):
+            print(f"\nBatch {batch + 1}/{num_batches}")
+            valid_episodes, step_counts = sampler.sample(
+                meta_batch_size,
+                meta_learner,
+                gamma=0.99,
+                gae_lambda=1.0,
+                device=device
+            )
+
+            avg_steps = np.mean(step_counts) if len(step_counts) > 0 else float('nan')
+            avg_steps_per_episode = avg_steps / sampler.batch_size 
+            avg_steps_per_batch.append(avg_steps_per_episode)
+            std_steps = np.std([s / sampler.batch_size for s in step_counts]) if len(step_counts) > 0 else 0.0
+            std_steps_per_batch.append(std_steps)
+            print(f"Average steps in Meta-batch {batch+1}: {avg_steps_per_episode}")
+
+            total_cost = 0
+            count = 0
+            all_costs = []
+            for ep in valid_episodes:
+                if hasattr(ep, '_costs') and ep._costs is not None:
+                    total_cost += ep._costs.sum().item()
+                    count      += ep._costs.shape[1]
+                    all_costs.extend(ep._costs.sum(dim=0).detach().cpu().numpy())
+                elif hasattr(ep, 'costs'):
+                    try:
+                        total_cost += ep.costs.sum().item()
+                        count      += ep.costs.shape[1]
+                        all_costs.extend(ep.costs.sum(dim=0).detach().cpu().numpy())
+                    except Exception:
+                        pass
+            avg_cost = total_cost / max(count, 1)
+            std_cost = float(np.std(all_costs)) if len(all_costs) > 0 else 0.0
+            avg_costs_per_batch.append(avg_cost)
+            std_costs_per_batch.append(std_cost)
+            print(f"Average cost in Batch {batch+1}: {avg_cost:.4f}")
+
+            meta_learner.step(valid_episodes, valid_episodes)
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        end_time = time.time()
+        training_time = end_time - start_time
+        time_per_iteration = training_time / num_batches
+        print(f"Total training time: {training_time:.2f} seconds")
+        print(f"Average time per iteration: {time_per_iteration:.2f} seconds")
+
+        # Save the trained meta-policy parameters
+        os.makedirs("unified_model", exist_ok=True)
+        save_dict = {
+            "policy": policy.state_dict(),
+            "mission_encoder": mission_encoder.state_dict(),
+            "mission_adapter": mission_adapter.state_dict(),
+        }
+        torch.save(save_dict, f"unified_model/lang_{env_name}_dt{delta}_{args.num_constraints}c.pth")
+
+        # Plotting
+        env_dir = os.path.join("metrics", f"{env_name}_{args.num_constraints}c")
+        os.makedirs(env_dir, exist_ok=True)
+        np.save(os.path.join(env_dir, f"unified_avg_steps_{delta}.npy"), np.array(avg_steps_per_batch))
+        np.save(os.path.join(env_dir, f"unified_std_steps_{delta}.npy"), np.array(std_steps_per_batch))
+        np.save(os.path.join(env_dir, f"unified_avg_costs_{delta}.npy"), np.array(avg_costs_per_batch))
+        np.save(os.path.join(env_dir, f"unified_std_costs_{delta}.npy"), np.array(std_costs_per_batch))
+        with open(os.path.join(env_dir, f"unified_meta_{delta}.json"), "w") as f:
+            json.dump({"label": "Unified LA-MAML", "env": env_name}, f)
+
+        plt.plot(avg_steps_per_batch)
+        plt.xlabel("Meta-batch")
+        plt.ylabel("Avg steps per episode")
+        plt.title(f"[Unified LA-MAML] {env_name} delta={delta} ({args.num_constraints}c)")
+        plt.savefig(os.path.join(env_dir, f"unified_plot_{delta}_{args.num_constraints}c.png"))
+        plt.close()
+
+        plt.plot(avg_costs_per_batch)
+        plt.xlabel("Meta-batch")
+        plt.ylabel("Avg cost per episode")
+        plt.title(f"[Unified LA-MAML] {env_name} cost  delta={delta} ({args.num_constraints}c)")
+        plt.savefig(os.path.join(env_dir, f"unified_cost_plot_{delta}_{args.num_constraints}c.png"))
+        plt.close()
 
 
 if __name__ == "__main__":

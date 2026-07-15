@@ -423,7 +423,7 @@ for c_room, c_dists in configs:
         sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
         return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
 
-    row = [c_room, c_dists, max_steps, delta_g]
+    row = [c_room, c_dists, max_steps, delta_g, delta_c]
     row += fmt(cfg_clamaml)
     if crl_ready:
         row += fmt(cfg_crl)
@@ -448,7 +448,7 @@ def fmt_global(bucket):
     sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
     return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
 
-avg_row = ["AVERAGE", "", "", ""]
+avg_row = ["AVERAGE", "", "", "", ""]
 avg_row += fmt_global(results_clamaml)
 if crl_ready:
     avg_row += fmt_global(results_crl)
@@ -499,7 +499,7 @@ else:
     is_new_sheet = True
 
 # Header
-header = ["Room Size", "Num Distractor", "Max Steps", "Delta G",
+header = ["Room Size", "Num Distractor", "Max Steps", "Delta G", "Delta C",
           "Avg Steps C-LAMAML", "Success Prob C-LAMAML", "Avg Viols C-LAMAML"]
 if crl_ready:
     header += ["Avg Steps CRL", "Success Prob CRL", "Avg Viols CRL"]
