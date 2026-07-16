@@ -48,7 +48,7 @@ p.add_argument("--num-dists", type=int, default=2)
 p.add_argument("--max-steps", type=int, default=300)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
-p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--num-constraints", type=int, default=2)
 p.add_argument("--deltas", type=float, nargs="+", default=[0.3, 0.5, 0.7, 0.9])
 args = p.parse_args()
 

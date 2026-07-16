@@ -49,7 +49,7 @@ p.add_argument("--delta-g", type=float, default=0.3)
 p.add_argument("--delta-c", type=float, default=0.1)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
-p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--num-constraints", type=int, default=2)
 args = p.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
