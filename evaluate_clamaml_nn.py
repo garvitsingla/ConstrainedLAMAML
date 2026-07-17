@@ -12,6 +12,7 @@ from collections import OrderedDict
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
+from torch.nn.utils.convert_parameters import parameters_to_vector
 
 warnings.filterwarnings("ignore")
 logging.getLogger("gymnasium").setLevel(logging.ERROR)
@@ -27,7 +28,7 @@ from environment import (
 from sampler_lang import (
     BabyAIMissionTaskWrapper, SentenceMissionEncoder,
     MissionParamAdapter, ConstraintParamAdapter,
-    preprocess_obs,
+    preprocess_obs,ConstrainedNN
 )
 from maml_rl.policies.categorical_mlp import CategoricalMLPPolicy
 
@@ -49,7 +50,8 @@ p.add_argument("--delta-g", type=float, default=0.3)
 p.add_argument("--delta-c", type=float, default=0.1)
 p.add_argument("--n-missions", type=int, default=10)
 p.add_argument("--n-episodes", type=int, default=10)
-p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--num-constraints", type=int, default=2)
+p.add_argument("--skip-random", action="store_true")
 args = p.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +174,7 @@ def get_configs(env_name):
 # Single-episode rollout
 # ─────────────────────────────────────────────────────────────────────────────
 def evaluate_policy(env, policy, params=None, seed=None):
+    """Run one episode. Returns (steps, success, violations)."""
     with silence():
         obs, _ = env.reset(seed=seed)
     done, steps, success, viols = False, 0, False, 0
@@ -195,40 +198,46 @@ def evaluate_policy(env, policy, params=None, seed=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Adapted params — 4 ablation variants
-# All use the SAME checkpoint, only differ in which adapter outputs are applied.
-#
-#   1. Full C-LAMAML:      θ' = θ + f_goal(goal)*δθ + f_constr(constr)*δc
-#   2. Global Only:         θ' = θ
-#   3. Goal Adapter Only:   θ' = θ + f_goal(goal)*δθ
-#   4. Constraint Only:     θ' = θ + f_constr(constr)*δc
+# Adapted params for NN C-LAMAML
 # ─────────────────────────────────────────────────────────────────────────────
-def get_adapted_params(mission, policy, encoder, m_adapter, c_adapter,
-                       delta_g, delta_c, use_goal=True, use_constraint=True):
+def get_nn_params(mission, policy, encoder, nn_net):
+    parts = mission.split(" and avoid ", 1)
+    goal_str, constr_str = (parts[0], "avoid " + parts[1]) if len(parts) == 2 else (mission, None)
+
+    with torch.no_grad():
+        g_emb = encoder(goal_str).to(device)
+        c_emb = encoder(constr_str).to(device) if constr_str else torch.zeros_like(g_emb)
+
+        if nn_net is not None:
+            theta_flat    = parameters_to_vector(list(policy.parameters()))
+            combined_inp  = torch.cat([theta_flat.unsqueeze(0), g_emb, c_emb], dim=-1)
+            theta_tensors = nn_net(combined_inp)
+            names = list(dict(policy.named_parameters()).keys())
+            return OrderedDict((n, t.squeeze(0)) for n, t in zip(names, theta_tensors))
+        else:
+            return OrderedDict(policy.named_parameters())
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adapted params for C-LAMAML
+# ─────────────────────────────────────────────────────────────────────────────
+def get_clamaml_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c):
+    """θ' = θ + Δθ_goal * delta_g + Δθ_constraint * delta_c"""
     parts = mission.split(" and avoid ", 1)
     goal_str = parts[0]
     constr_str = ("avoid " + parts[1]) if len(parts) == 2 else None
 
     with torch.no_grad():
+        g_emb    = encoder(goal_str).to(device)
+        deltas_g = m_adapter(g_emb)
+        deltas_c = [torch.zeros_like(d) for d in deltas_g]
+        if constr_str and c_adapter:
+            c_emb    = encoder(constr_str).to(device)
+            deltas_c = c_adapter(c_emb)
+
         names  = list(dict(policy.named_parameters()).keys())
         params = list(policy.parameters())
-
-        # Goal delta
-        if use_goal:
-            g_emb    = encoder(goal_str).to(device)
-            deltas_g = [dg.squeeze(0) * delta_g for dg in m_adapter(g_emb)]
-        else:
-            deltas_g = [torch.zeros_like(p) for p in params]
-
-        # Constraint delta
-        if use_constraint and constr_str and c_adapter:
-            c_emb    = encoder(constr_str).to(device)
-            deltas_c = [dc.squeeze(0) * delta_c for dc in c_adapter(c_emb)]
-        else:
-            deltas_c = [torch.zeros_like(p) for p in params]
-
         return OrderedDict(
-            (n, p + dg + dc)
+            (n, p + dg.squeeze(0) * delta_g + dc.squeeze(0) * delta_c)
             for n, p, dg, dc in zip(names, params, deltas_g, deltas_c)
         )
 
@@ -268,7 +277,7 @@ policy_param_shapes = [p.shape for p in make_policy().parameters()]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load C-LAMAML checkpoint (shared across all 4 ablations)
+# 1. Load C-LAMAML
 # ─────────────────────────────────────────────────────────────────────────────
 clamaml_ckpt = f"lang_model/lang_{env_name}_dt{delta_g}_dc{delta_c}_{nc}c.pth"
 if not os.path.exists(clamaml_ckpt):
@@ -279,45 +288,57 @@ if not os.path.exists(clamaml_ckpt):
     if os.path.exists(clamaml_ckpt_alt):
         clamaml_ckpt = clamaml_ckpt_alt
 
-if not os.path.exists(clamaml_ckpt):
+if os.path.exists(clamaml_ckpt):
+    ckpt = torch.load(clamaml_ckpt, map_location=device)
+    policy_clamaml = make_policy()
+    policy_clamaml.load_state_dict(ckpt["policy"])
+    policy_clamaml.eval()
+
+    encoder = SentenceMissionEncoder(
+        model_name="all-MiniLM-L6-v2", frozen=True,
+        normalize=True, cache=True, device=device,
+    )
+    encoder.eval()
+    enc_dim = encoder.output_dim
+
+    m_adapter = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
+    m_adapter.load_state_dict(ckpt["mission_adapter"])
+    m_adapter.eval()
+
+    c_adapter = None
+    if "constraint_adapter" in ckpt:
+        c_adapter = ConstraintParamAdapter(enc_dim, policy_param_shapes).to(device)
+        c_adapter.load_state_dict(ckpt["constraint_adapter"])
+        c_adapter.eval()
+
+    print(f"[✓] C-LAMAML loaded from {clamaml_ckpt}")
+else:
     raise FileNotFoundError(f"C-LAMAML checkpoint not found: {clamaml_ckpt}")
 
-ckpt = torch.load(clamaml_ckpt, map_location=device)
+
+# Load NN C-LAMAML model
+ckpt_path = f"nn_model/lang_{env_name}_nn_{nc}c.pth"
+if not os.path.exists(ckpt_path):
+    raise FileNotFoundError(f"NN checkpoint not found: {ckpt_path}")
+
+print(f"[✓] Loading NN C-LAMAML checkpoint from: {ckpt_path}")
+ckpt = torch.load(ckpt_path, map_location=device)
+
 policy = make_policy()
 policy.load_state_dict(ckpt["policy"])
 policy.eval()
 
-encoder = SentenceMissionEncoder(
-    model_name="all-MiniLM-L6-v2", frozen=True,
-    normalize=True, cache=True, device=device,
-)
-encoder.eval()
-enc_dim = encoder.output_dim
-
-m_adapter = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
-m_adapter.load_state_dict(ckpt["mission_adapter"])
-m_adapter.eval()
-
-c_adapter = None
-if "constraint_adapter" in ckpt:
-    c_adapter = ConstraintParamAdapter(enc_dim, policy_param_shapes).to(device)
-    c_adapter.load_state_dict(ckpt["constraint_adapter"])
-    c_adapter.eval()
-
-print(f"[✓] C-LAMAML loaded from {clamaml_ckpt}")
-print(f"    Goal adapter: ✓")
-print(f"    Constraint adapter: {'✓' if c_adapter else '✗'}")
+nn_net = None
+if ckpt.get("nn") is not None:
+    nn_net = ConstrainedNN(enc_dim, policy_param_shapes).to(device)
+    nn_net.load_state_dict(ckpt["nn"])
+    nn_net.eval()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Define the 4 ablation methods
-# ─────────────────────────────────────────────────────────────────────────────
-ABLATIONS = [
-    "C-LAMAML",
-    "Global Only",
-    "Global + Goal Adapter",
-    "Global + Constraint Adapter",
-]
+# # ─────────────────────────────────────────────────────────────────────────────
+# # 3. Random baseline (no loading needed)
+# # ─────────────────────────────────────────────────────────────────────────────
+# random_ready = not args.skip_random
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,15 +347,20 @@ ABLATIONS = [
 configs    = get_configs(env_name)
 test_tasks = random.sample(all_missions, min(n_missions, len(all_missions)))
 
-# Global accumulators
-all_results = {label: {'steps': [], 'successes': [], 'viols': []} for label in ABLATIONS}
-excel_rows  = []
+# Accumulators across all configs
+results_clamaml = {'steps': [], 'successes': [], 'viols': []}
+results_nn     = {'steps': [], 'successes': [], 'viols': []}
+# results_random  = {'steps': [], 'successes': [], 'viols': []}
 
-print(f"\n{'='*70}")
-print(f"Ablation Study: {env_name}")
+excel_rows = []
+
+print(f"\n{'='*65}")
+print(f"Evaluation: {env_name}")
 print(f"Tasks: {n_missions} | Episodes/task: {n_episodes} | "
       f"delta_g: {delta_g} | delta_c: {delta_c}")
-print(f"{'='*70}\n")
+print(f"Methods: C-LAMAML | NN C-LAMAML")
+print(f"{'='*65}\n")
+
 
 for c_room, c_dists in configs:
     print(f"Config: Room={c_room}, Dists={c_dists}")
@@ -342,54 +368,72 @@ for c_room, c_dists in configs:
     env = build_env(env_name, c_room, c_dists, max_steps,
                     all_missions, goals_list, constraints_list)
 
-    cfg_results = {label: {'steps': [], 'successes': [], 'viols': []} for label in ABLATIONS}
+    cfg_clamaml = {'steps': [], 'successes': [], 'viols': []}
+    cfg_nn     = {'steps': [], 'successes': [], 'viols': []}
+    # cfg_random  = {'steps': [], 'successes': [], 'viols': []}
 
     for mission in test_tasks:
         ep_seeds = [random.randint(0, 1_000_000) for _ in range(n_episodes)]
 
-        # 1. C-LAMAML
-        theta_full = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=True, use_constraint=True)
+        # ── C-LAMAML ────────────────────────────────────────────────────
+        theta_prime = get_clamaml_params(
+            mission, policy_clamaml, encoder, m_adapter, c_adapter,
+            delta_g, delta_c
+        )
         for ep in range(n_episodes):
             env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_full, seed=ep_seeds[ep])
-            cfg_results["C-LAMAML"]['steps'].append(s)
-            cfg_results["C-LAMAML"]['successes'].append(ok)
-            cfg_results["C-LAMAML"]['viols'].append(v)
+            s, ok, v = evaluate_policy(env, policy_clamaml, params=theta_prime, seed=ep_seeds[ep])
+            cfg_clamaml['steps'].append(s)
+            cfg_clamaml['successes'].append(ok)
+            cfg_clamaml['viols'].append(v)
 
-        # 2. Global Params Only (No Adapters)
-        theta_global = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=False, use_constraint=False)
+        # ── NN C-LAMAML ──────────────────────────────────────────────
+        theta = get_nn_params(mission, policy, encoder, nn_net)
+        
         for ep in range(n_episodes):
             env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_global, seed=ep_seeds[ep])
-            cfg_results["Global Only"]['steps'].append(s)
-            cfg_results["Global Only"]['successes'].append(ok)
-            cfg_results["Global Only"]['viols'].append(v)
+            s, ok, v = evaluate_policy(env, policy, params=theta, seed=ep_seeds[ep])
+            cfg_nn['steps'].append(s)
+            cfg_nn['successes'].append(ok)
+            cfg_nn['viols'].append(v)        
 
-        # 3. Global + Goal Adapter
-        theta_goal = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=True, use_constraint=False)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_goal, seed=ep_seeds[ep])
-            cfg_results["Global + Goal Adapter"]['steps'].append(s)
-            cfg_results["Global + Goal Adapter"]['successes'].append(ok)
-            cfg_results["Global + Goal Adapter"]['viols'].append(v)
+        # if crl_ready:
+        #     for ep in range(n_episodes):
+        #         env.reset_task(mission)
+        #         s, ok, v = evaluate_policy(env, policy_crl, params=None, seed=ep_seeds[ep])
+        #         cfg_crl['steps'].append(s)
+        #         cfg_crl['successes'].append(ok)
+        #         cfg_crl['viols'].append(v)
 
-        # 4. Global + Constraint Adapter
-        theta_constr = get_adapted_params(mission, policy, encoder, m_adapter, c_adapter, delta_g, delta_c, use_goal=False, use_constraint=True)
-        for ep in range(n_episodes):
-            env.reset_task(mission)
-            s, ok, v = evaluate_policy(env, policy, params=theta_constr, seed=ep_seeds[ep])
-            cfg_results["Global + Constraint Adapter"]['steps'].append(s)
-            cfg_results["Global + Constraint Adapter"]['successes'].append(ok)
-            cfg_results["Global + Constraint Adapter"]['viols'].append(v)
+        # # ── Random ──────────────────────────────────────────────────────
+        # if random_ready:
+        #     for ep in range(n_episodes):
+        #         env.reset_task(mission)
+        #         s, ok, v = evaluate_random(env, seed=ep_seeds[ep])
+        #         cfg_random['steps'].append(s)
+        #         cfg_random['successes'].append(ok)
+        #         cfg_random['viols'].append(v)
 
-    # Accumulate into global
-    for label in ABLATIONS:
-        all_results[label]['steps'].extend(cfg_results[label]['steps'])
-        all_results[label]['successes'].extend(cfg_results[label]['successes'])
-        all_results[label]['viols'].extend(cfg_results[label]['viols'])
+    # Accumulate into global results
+    results_clamaml['steps'].extend(cfg_clamaml['steps'])
+    results_clamaml['successes'].extend(cfg_clamaml['successes'])
+    results_clamaml['viols'].extend(cfg_clamaml['viols'])
 
-    # Build Excel row
+    results_nn['steps'].extend(cfg_nn['steps'])
+    results_nn['successes'].extend(cfg_nn['successes'])
+    results_nn['viols'].extend(cfg_nn['viols'])
+
+    # if crl_ready:
+    #     results_crl['steps'].extend(cfg_crl['steps'])
+    #     results_crl['successes'].extend(cfg_crl['successes'])
+    #     results_crl['viols'].extend(cfg_crl['viols'])
+
+    # if random_ready:
+    #     results_random['steps'].extend(cfg_random['steps'])
+    #     results_random['successes'].extend(cfg_random['successes'])
+    #     results_random['viols'].extend(cfg_random['viols'])
+
+    # Build Excel row for this config
     def fmt(bucket):
         ms = np.mean(bucket['steps']) if bucket['steps'] else 0.0
         ss = np.std(bucket['steps'])  if bucket['steps'] else 0.0
@@ -399,48 +443,67 @@ for c_room, c_dists in configs:
         return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
 
     row = [c_room, c_dists, max_steps, delta_g, delta_c]
-    for label in ABLATIONS:
-        row += fmt(cfg_results[label])
+    row += fmt(cfg_clamaml)
+    row += fmt(cfg_nn)
+    # if crl_ready:
+    #     row += fmt(cfg_crl)
+    # if random_ready:
+    #     row += fmt(cfg_random)
     excel_rows.append(row)
 
-    # Print per-config summary
-    srs = [f"{label}: {np.mean(cfg_results[label]['successes'])*100:.1f}%"
-           for label in ABLATIONS]
-    print(f"  SR → {' | '.join(srs)}")
+    # Print a quick summary for this config
+    sr_c = np.mean(cfg_clamaml['successes'])*100 if cfg_clamaml['successes'] else 0
+    sr_r = np.mean(cfg_nn['successes'])*100 if cfg_nn['successes'] else 0
+    print(f"  C-LAMAML SR: {sr_c:.1f}%  |  NN C-LAMAML SR: {sr_r:.1f}%")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AVERAGE row
 # ─────────────────────────────────────────────────────────────────────────────
+def fmt_global(bucket):
+    ms = np.mean(bucket['steps']) if bucket['steps'] else 0.0
+    ss = np.std(bucket['steps'])  if bucket['steps'] else 0.0
+    sr = round(np.mean(bucket['successes']), 2) if bucket['successes'] else 0.0
+    mv = np.mean(bucket['viols']) if bucket['viols'] else 0.0
+    sv = np.std(bucket['viols'])  if bucket['viols'] else 0.0
+    return [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
+
 avg_row = ["AVERAGE", "", "", "", ""]
-for label in ABLATIONS:
-    b = all_results[label]
-    ms = np.mean(b['steps']) if b['steps'] else 0.0
-    ss = np.std(b['steps'])  if b['steps'] else 0.0
-    sr = round(np.mean(b['successes']), 2) if b['successes'] else 0.0
-    mv = np.mean(b['viols']) if b['viols'] else 0.0
-    sv = np.std(b['viols'])  if b['viols'] else 0.0
-    avg_row += [f"{ms:.2f} ± {ss:.2f}", sr, f"{mv:.2f} ± {sv:.2f}"]
+avg_row += fmt_global(results_clamaml)
+avg_row += fmt_global(results_nn)
+# if crl_ready:
+#     avg_row += fmt_global(results_crl)
+# if random_ready:
+#     avg_row += fmt_global(results_random)
 excel_rows.append(avg_row)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Console summary
 # ─────────────────────────────────────────────────────────────────────────────
-print(f"\n{'='*70}")
-print("FINAL AGGREGATE RESULTS (Ablation Study)")
-print(f"{'='*70}")
-for label in ABLATIONS:
-    b = all_results[label]
-    print(f"{label:30s}:  SR={np.mean(b['successes'])*100:.2f}%  "
-          f"Steps={np.mean(b['steps']):.2f} ± {np.std(b['steps']):.2f}  "
-          f"Viols={np.mean(b['viols']):.2f} ± {np.std(b['viols']):.2f}")
+print(f"\n{'='*65}")
+print("FINAL AGGREGATE RESULTS")
+print(f"{'='*65}")
+print(f"C-LAMAML       :  SR={np.mean(results_clamaml['successes'])*100:.2f}%  "
+      f"Steps={np.mean(results_clamaml['steps']):.2f} ± {np.std(results_clamaml['steps']):.2f}  "
+      f"Viols={np.mean(results_clamaml['viols']):.2f} ± {np.std(results_clamaml['viols']):.2f}")
+print(f"NN C-LAMAML    :  SR={np.mean(results_nn['successes'])*100:.2f}%  "
+      f"Steps={np.mean(results_nn['steps']):.2f} ± {np.std(results_nn['steps']):.2f}  "
+      f"Viols={np.mean(results_nn['viols']):.2f} ± {np.std(results_nn['viols']):.2f}")
+# if crl_ready:
+#     print(f"Constrained RL :  SR={np.mean(results_crl['successes'])*100:.2f}%  "
+#           f"Steps={np.mean(results_crl['steps']):.2f} ± {np.std(results_crl['steps']):.2f}  "
+#           f"Viols={np.mean(results_crl['viols']):.2f} ± {np.std(results_crl['viols']):.2f}")
+# if random_ready:
+    # print(f"Random         :  SR={np.mean(results_random['successes'])*100:.2f}%  "
+    #       f"Steps={np.mean(results_random['steps']):.2f} ± {np.std(results_random['steps']):.2f}  "
+    #       f"Viols={np.mean(results_random['viols']):.2f} ± {np.std(results_random['viols']):.2f}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Save to Excel
 # ─────────────────────────────────────────────────────────────────────────────
-xlsx_path = "ablation_results.xlsx"
+xlsx_path = "clamaml_nn_results.xlsx"
 if os.path.exists(xlsx_path):
     wb = load_workbook(xlsx_path)
 else:
@@ -453,16 +516,20 @@ is_new_sheet = False
 if sheet_name in wb.sheetnames:
     ws = wb[sheet_name]
     ws.append([])
-    ws.append([f"--- NEW RUN: delta_g={delta_g}, delta_c={delta_c} ---"])
+    ws.append([f"--- NEW RUN: C-LAMAML (dt={delta_g}, dc={delta_c}) vs CRL vs Random ---"])
     ws[ws.max_row][0].font = Font(bold=True)
 else:
     ws = wb.create_sheet(sheet_name)
     is_new_sheet = True
 
 # Header
-header = ["Room Size", "Num Distractor", "Max Steps", "Delta G", "Delta C"]
-for label in ABLATIONS:
-    header += [f"Avg Steps {label}", f"Success Prob {label}", f"Avg Viols {label}"]
+header = ["Room Size", "Num Distractor", "Max Steps", "Delta G", "Delta C",
+          "Avg Steps C-LAMAML", "Success Prob C-LAMAML", "Avg Viols C-LAMAML",
+          "Avg Steps NN C-LAMAML", "Success Prob NN C-LAMAML", "Avg Viols NN C-LAMAML"]
+# if crl_ready:
+#     header += ["Avg Steps CRL", "Success Prob CRL", "Avg Viols CRL"]
+# if random_ready:
+#     header += ["Avg Steps Random", "Success Prob Random", "Avg Viols Random"]
 ws.append(header)
 
 # Bold the header row
@@ -472,6 +539,7 @@ for cell in ws[ws.max_row]:
 for row in excel_rows:
     ws.append(row)
 
+# Bold the AVERAGE row
 for cell in ws[ws.max_row]:
     cell.font = Font(bold=True)
 
