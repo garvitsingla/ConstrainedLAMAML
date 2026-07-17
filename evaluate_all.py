@@ -68,7 +68,7 @@ p.add_argument("--skip-clamaml", action="store_true")
 p.add_argument("--skip-unified", action="store_true")
 p.add_argument("--skip-nn",      action="store_true")
 p.add_argument("--skip-random",  action="store_true")
-p.add_argument("--num-constraints", type=int, default=1)
+p.add_argument("--num-constraints", type=int, default=2)
 args = p.parse_args()
 
 seed = 42
@@ -219,18 +219,18 @@ if not args.skip_clamaml:
 
 
 # ── LoadLA-MAML ───────────────────────────────────────────────────────
-unified_ready = False
-if not args.skip_unified:
-    _ckpt_path = f"unified_model/lang_{env_name}_dt{delta_g}_{args.num_constraints}c.pth"
-    if os.path.exists(_ckpt_path):
-        ckpt_u = torch.load(_ckpt_path, map_location=device)
-        policy_u = _make_policy(); policy_u.load_state_dict(ckpt_u["policy"]); policy_u.eval()
-        adapter_u = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
-        adapter_u.load_state_dict(ckpt_u["mission_adapter"]); adapter_u.eval()
-        unified_ready = True
-        print(f"[✓] LA-MAML loaded from {_ckpt_path}")
-    else:
-        print(f"[✗] LA-MAML checkpoint not found: {_ckpt_path}  (skipping)")
+# unified_ready = False
+# if not args.skip_unified:
+#     _ckpt_path = f"unified_model/lang_{env_name}_dt{delta_g}_{args.num_constraints}c.pth"
+#     if os.path.exists(_ckpt_path):
+#         ckpt_u = torch.load(_ckpt_path, map_location=device)
+#         policy_u = _make_policy(); policy_u.load_state_dict(ckpt_u["policy"]); policy_u.eval()
+#         adapter_u = MissionParamAdapter(enc_dim, policy_param_shapes).to(device)
+#         adapter_u.load_state_dict(ckpt_u["mission_adapter"]); adapter_u.eval()
+#         unified_ready = True
+#         print(f"[✓] LA-MAML loaded from {_ckpt_path}")
+#     else:
+#         print(f"[✗] LA-MAML checkpoint not found: {_ckpt_path}  (skipping)")
 
 
 # ── Load NN C-LAMAML ───────────────────────────────────────────────────────
@@ -273,18 +273,18 @@ def _params_clamaml(mission):
         )
 
 
-def _params_unified(mission):
-    """θ' = θ + Δθ_unified  (full combined string)"""
-    combined = f"{mission[0]} and {mission[1]}" if isinstance(mission, tuple) else mission
-    with torch.no_grad():
-        emb    = mission_encoder(combined).to(device)
-        deltas = adapter_u(emb)
-        names  = list(dict(policy_u.named_parameters()).keys())
-        params = list(policy_u.parameters())
-        return OrderedDict(
-            (n, p + d.squeeze(0) * delta_g)
-            for n, p, d in zip(names, params, deltas)
-        )
+# def _params_unified(mission):
+#     """θ' = θ + Δθ_unified  (full combined string)"""
+#     combined = f"{mission[0]} and {mission[1]}" if isinstance(mission, tuple) else mission
+#     with torch.no_grad():
+#         emb    = mission_encoder(combined).to(device)
+#         deltas = adapter_u(emb)
+#         names  = list(dict(policy_u.named_parameters()).keys())
+#         params = list(policy_u.parameters())
+#         return OrderedDict(
+#             (n, p + d.squeeze(0) * delta_g)
+#             for n, p, d in zip(names, params, deltas)
+#         )
 
 
 def _params_nn(mission):
@@ -325,19 +325,19 @@ def rollout(policy, params, preproc=sampler_lang.preprocess_obs, seed=None):
     return steps, success, viols
 
 
-def rollout_random(seed=None):
-    with silence():
-        obs, _ = env.reset(seed=seed)
-    done, steps, success, viols = False, 0, False, 0
-    env_max = getattr(env.unwrapped, 'max_steps', max_steps)
-    while not done and steps < env_max:
-        obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
-        done = terminated or truncated
-        steps += 1
-        viols += int(info.get('cost', 0) > 0)
-        if terminated:
-            success = True
-    return steps, success, viols
+# def rollout_random(seed=None):
+#     with silence():
+#         obs, _ = env.reset(seed=seed)
+#     done, steps, success, viols = False, 0, False, 0
+#     env_max = getattr(env.unwrapped, 'max_steps', max_steps)
+#     while not done and steps < env_max:
+#         obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+#         done = terminated or truncated
+#         steps += 1
+#         viols += int(info.get('cost', 0) > 0)
+#         if terminated:
+#             success = True
+#     return steps, success, viols
 
 
 # ── Select test tasks ──────────────────────────────────────────────────────────
@@ -346,9 +346,9 @@ test_tasks = random.sample(all_missions, min(n_missions, len(all_missions)))
 # ── Run evaluation ─────────────────────────────────────────────────────────────
 METHODS = []
 if clamaml_ready:  METHODS.append(("C-LAMAML", policy_c, _params_clamaml))
-if unified_ready:  METHODS.append(("LAMAML", policy_u, _params_unified))
+# if unified_ready:  METHODS.append(("LAMAML", policy_u, _params_unified))
 if nn_ready:       METHODS.append(("NN_C_LAMAML", policy_n, _params_nn))
-METHODS.append(("Random", None, None))
+# METHODS.append(("Random", None, None))
 
 # per-method stats: list of (sr, avg_steps, avg_viols) per task
 per_task = {m[0]: [] for m in METHODS}
@@ -368,17 +368,17 @@ for mission in test_tasks:
 
     for (mname, policy, get_params) in METHODS:
         ep_steps, ep_succ, ep_viols = [], [], []
-        if mname == "Random":
-            for ep in range(n_episodes):
-                env.reset_task(mission)
-                s, ok, v = rollout_random(seed=ep_seeds[ep])
-                ep_steps.append(s); ep_succ.append(ok); ep_viols.append(v)
-        else:
-            params = get_params(mission)
-            for ep in range(n_episodes):
-                env.reset_task(mission)
-                s, ok, v = rollout(policy, params, seed=ep_seeds[ep])
-                ep_steps.append(s); ep_succ.append(ok); ep_viols.append(v)
+        # if mname == "Random":
+        #     for ep in range(n_episodes):
+        #         env.reset_task(mission)
+        #         s, ok, v = rollout_random(seed=ep_seeds[ep])
+        #         ep_steps.append(s); ep_succ.append(ok); ep_viols.append(v)
+        # else:
+        params = get_params(mission)
+        for ep in range(n_episodes):
+            env.reset_task(mission)
+            s, ok, v = rollout(policy, params, seed=ep_seeds[ep])
+            ep_steps.append(s); ep_succ.append(ok); ep_viols.append(v)
         
         sr    = np.mean(ep_succ)
         avgst = np.mean(ep_steps)
@@ -401,7 +401,7 @@ for (mname, _, __) in METHODS:
 print("="*65)
 
 # ── Excel logging ──────────────────────────────────────────────────────────────
-xlsx_path = "evaluation_results.xlsx"
+xlsx_path = "evaluation_nn_results.xlsx"
 if os.path.exists(xlsx_path):
     wb = load_workbook(xlsx_path)
 else:
@@ -416,22 +416,23 @@ if summary_name not in wb.sheetnames:
     # Row 1: Merged Method Names
     ws_sum.append(["Env", "Room", "Dists", "Steps", 
                    "Constrained-LAMAML", "", "", 
-                   "LAMAML", "", "", 
+                #    "LAMAML", "", "", 
                    "NN_C_LAMAML", "", "", 
-                   "Random", "", ""])
+                #    "Random", "", ""
+                   ])
     
     # Row 2: Specific Metrics
     ws_sum.append(["", "", "", "", 
-                   "SR%", "Steps", "Viols", 
-                   "SR%", "Steps", "Viols", 
+                #    "SR%", "Steps", "Viols", 
+                #    "SR%", "Steps", "Viols", 
                    "SR%", "Steps", "Viols", 
                    "SR%", "Steps", "Viols"])
 
     # Merges
     ws_sum.merge_cells('E1:G1') # Constrained-LAMAML
     ws_sum.merge_cells('H1:J1') # LAMAML
-    ws_sum.merge_cells('K1:M1') # NN_C_LAMAML
-    ws_sum.merge_cells('N1:P1') # Random
+    # ws_sum.merge_cells('K1:M1') # NN_C_LAMAML
+    # ws_sum.merge_cells('N1:P1') # Random
     
     ws_sum.merge_cells('A1:A2') # Env
     ws_sum.merge_cells('B1:B2') # Room
@@ -456,7 +457,11 @@ def _agg(mname):
             round(np.mean([x[2] for x in data]), 2))
 
 ws_sum.append([f"{env_name} ({args.num_constraints}c)", room_size, num_dists, max_steps,
-               *_agg("C-LAMAML"), *_agg("LAMAML"), *_agg("NN_C_LAMAML"), *_agg("Random")])
+               *_agg("C-LAMAML"), 
+            #    *_agg("LAMAML"), 
+               *_agg("NN_C_LAMAML")
+            #    *_agg("Random")
+               ])
 
 # Per-mission sheet (overwritten per run)
 sheet_name = (f"{env_name}_{args.num_constraints}c_Missions")[:31]
